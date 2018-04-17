@@ -48,7 +48,6 @@ class _LED_Data(object):
 		else:
 			return ws.ws2811_led_set(self.channel, pos, value)
 
-
 class Adafruit_NeoPixel(object):
 	def __init__(self, num, pin, freq_hz=800000, dma=10, invert=False,
 			brightness=255, channel=0, strip_type=ws.WS2811_STRIP_RGB):
@@ -149,3 +148,6 @@ class Adafruit_NeoPixel(object):
 	def getPixelColor(self, n):
 		"""Get the 24-bit RGB color value for the LED at position n."""
 		return self._led_data[n]
+
+	def serve(self, streaming, port):
+		ws.ws_server_serve(self._leds, self._channel, streaming, port)

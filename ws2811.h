@@ -81,6 +81,25 @@ typedef struct
     uint8_t *gamma;                              //< Gamma correction table
 } ws2811_channel_t;
 
+
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <strings.h>
+#include <errno.h>
+#include <stdbool.h>
+
+typedef struct
+{
+    uint8_t streaming;         //< Streaming vs udp packet generation
+    int  fd;          //< Socket bound
+    int  port;
+} ws2811_server;
+
 typedef struct
 {
     uint64_t render_wait_time;                   //< time in µs before the next render can run
@@ -122,6 +141,130 @@ void ws2811_fini(ws2811_t *ws2811);                                    //< Tear 
 ws2811_return_t ws2811_render(ws2811_t *ws2811);                       //< Send LEDs off to hardware
 ws2811_return_t ws2811_wait(ws2811_t *ws2811);                         //< Wait for DMA completion
 const char * ws2811_get_return_t_str(const ws2811_return_t state);     //< Get string representation of the given return state
+
+// return true if should continue
+static inline
+bool checkForRequest(ws2811_server *server, ws2811_channel_t* channel, ws2811_t *ws2811) {
+  struct sockaddr_in clientaddr; /* client addr */
+  socklen_t clientlen = sizeof(clientaddr);
+
+  // Wait for connection
+  int childfd = accept(server->fd, (struct sockaddr *) &clientaddr, &clientlen);
+  if( childfd < 0 )  {
+    if(errno==EAGAIN || errno==EWOULDBLOCK) {
+        errno = 0;
+        return true;
+    }
+    perror("Accepting error");
+    exit(1);
+  }
+
+  struct timeval timeout;
+  timeout.tv_sec = 0;
+  timeout.tv_usec = 0;
+    if (setsockopt (childfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout,
+                    sizeof(timeout)) < 0) {
+        perror("Failed to set options");
+        exit(1);
+    }
+
+  pid_t f = fork();
+  if( f != 0 ) {
+    close(childfd);
+    return true;
+  }
+
+  printf("accepting new connection on file descriptor: %d\n", childfd);
+  while (1) {
+    struct {
+        uint16_t offset;
+        uint16_t length;
+    } info;
+    int bytes_read = 0;
+
+    bytes_read = read(childfd, &info, sizeof(info));
+    if (bytes_read < 0) {
+        perror("Failed to read info");
+        goto error;
+    }
+    if ((unsigned)bytes_read != sizeof(info)) {
+        printf("info: didn't read appropriate amount read %d expected %d\n", bytes_read, sizeof(info));
+        goto error;
+    }
+
+    assert (info.length > 0);
+
+    bytes_read = read(childfd, channel->leds + info.offset, info.length * sizeof(ws2811_led_t));
+    if (bytes_read < 0) {
+        perror("Failed to read data");
+        goto error;
+    }
+    if ((unsigned)bytes_read != info.length * sizeof(ws2811_led_t)) {
+        printf("data: didn't read appropriate amount read %d expected %d\n", bytes_read, sizeof(info));
+        goto error;
+    }
+
+    ws2811_render(ws2811);
+    continue;
+
+    error:;
+    close(childfd);
+    break;
+  }
+  exit(0);
+  return false;
+}
+
+static inline
+void server_serve(ws2811_t *ws2811, ws2811_channel_t* channel, uint8_t streaming, int port) {
+  assert(streaming);
+  ws2811_server server;
+  server.streaming = streaming;
+  server.port = port;
+  server.fd = socket(AF_INET, SOCK_STREAM, 0);
+  if( server.fd < 0 ) {
+    perror("Socket creation error:");
+    exit(1);
+  }
+
+  {
+    /* setsockopt: Handy debugging trick that lets
+     * us rerun the server immediately after we kill it;
+     * otherwise we have to wait about 20 secs.
+     * Eliminates "ERROR on binding: Address already in use" error.
+     */
+    int optval = 1;
+    setsockopt(server.fd, SOL_SOCKET, SO_REUSEADDR, (const void *)&optval , sizeof(int));
+  }
+
+  struct sockaddr_in serveraddr; /* server's addr */
+  bzero((char *) &serveraddr, sizeof(serveraddr));
+
+  serveraddr.sin_family = AF_INET;
+  serveraddr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+  serveraddr.sin_port = htons((unsigned short)server.port);
+
+  if (bind(server.fd, (struct sockaddr *) &serveraddr, sizeof(serveraddr)) < 0) {
+    perror("Binding error:");
+    exit(1);
+  }
+
+  if (listen(server.fd, SOMAXCONN) < 0) {
+    perror("Listen error:");
+    exit(1);
+  }
+
+  struct timeval timeout;
+  timeout.tv_sec = 2;
+  timeout.tv_usec = 0;
+  if (setsockopt (server.fd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout,
+                  sizeof(timeout)) < 0) {
+    perror("Set timeout error:");
+    exit(1);
+  }
+  while(checkForRequest(&server, channel, ws2811));
+}
 
 #ifdef __cplusplus
 }

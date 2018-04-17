@@ -45,4 +45,9 @@
     {
         return &ws->channel[channelnum];
     }
+
+    void ws_server_serve(ws2811_t *ws, ws2811_channel_t *channel, uint8_t streaming, int port)
+    {
+        server_serve(ws, channel, streaming, port);
+    }
 %}
